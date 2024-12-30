@@ -78,8 +78,8 @@ fn format_port(port: &Port) -> String {
     };
     if let (Some(ip), Some(public)) = (&port.ip, &port.public_port) {
         let ip_format = match ip.as_str() {
-            "::" => "[::]:",
-            _ => &format!("{ip}:"),
+            "::" => "[::]:".into(),
+             other => format!("{}", other),
         };
         return format!("{ip_format}{public}->{private}{typ}");
     } else {

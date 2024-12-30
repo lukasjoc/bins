@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
     if let Some(command) = args.command {
         match command {
-            Commands::Docker(cli) => cli.run().map_err(|err| format!("Error: {:?}", err))?,
+            Commands::Docker(cli) => cli.run().map_err(|err| format!("{err}"))?,
         }
     }
     Ok(())
