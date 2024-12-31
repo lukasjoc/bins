@@ -5,7 +5,9 @@ mod table;
 
 #[derive(clap::Subcommand)]
 enum Commands {
+    #[command(arg_required_else_help(true))]
     Docker(docker::Cli),
+    #[command(arg_required_else_help(true))]
     Fritz(fritz::Cli),
 }
 
