@@ -1,2 +1,3 @@
 /target
 compose.yml
+.env
