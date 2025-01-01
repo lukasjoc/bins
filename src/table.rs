@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 pub(crate) trait TableRow<'a>: Serialize {
-    /// Get the names for the columns for a table line.
+    /// Get the names for the columns for a table row.
     fn columns(&self) -> Option<Vec<String>> {
         if let Ok(value) = serde_json::to_value(self) {
             if let Some(keys) = value.as_object().map(|o| o.keys()) {
@@ -10,7 +10,7 @@ pub(crate) trait TableRow<'a>: Serialize {
         }
         return None;
     }
-    /// Get the raw cell data for each line based on the columns specified in the type.
+    /// Get the raw cell data for each row based on the columns specified in the type.
     fn cells(&self) -> Option<Vec<String>> {
         if let Ok(value) = serde_json::to_value(self) {
             if let Some(values) = value.as_object().map(|o| o.values()) {
@@ -56,7 +56,7 @@ impl Renderer {
         let mut column_widths: Vec<usize> = cols.iter().map(|name| name.len()).collect();
         let cells: Vec<String> = rows
             .iter()
-            .flat_map(|line| line.cells().unwrap_or_default()) /*FIXME: NOT SURE I LIKE THIS :, */
+            .flat_map(|row| row.cells().unwrap_or_default()) /*FIXME: NOT SURE I LIKE THIS :, */
             .collect();
 
         for column_index in 0..cols.len() {

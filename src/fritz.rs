@@ -2,7 +2,7 @@
 /*** WORK IN PROGGERS   ***/
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::{env, fs, path::PathBuf};
 
 use crate::table;
 
@@ -91,15 +91,27 @@ struct FritzApi {
     client: reqwest::blocking::Client,
 }
 
+type AnyError<T> = Result<T, Box<dyn std::error::Error>>;
+
+macro_rules! form_data {
+      ($( $pairs:expr ),*) => {{
+        use form_urlencoded::Serializer;
+        let mut se = Serializer::new(String::new());
+        {$(for pair in $pairs {
+            se.append_pair(pair.0, pair.1);
+        })*}
+        se.finish()
+    }};
+}
+
 impl FritzApi {
-    fn login(&self) -> reqwest::Result<Session> {
+    fn login(&self) -> AnyError<Session> {
         let challenge_response = self
             .client
             .get(format!("{base}/login_sid.lua", base = self.config.base_url))
             .send()?
             .text()?;
-        let info: Session =
-            serde_xml_rs::from_str(&challenge_response).expect("Should get the session info");
+        let info: Session = serde_xml_rs::from_str(&challenge_response)?;
 
         let mut buf: Vec<u8> = vec![];
         for char in (format!("{}-{}", info.challenge, self.config.password)).encode_utf16() {
@@ -108,7 +120,7 @@ impl FritzApi {
                 other => other,
             };
             use std::io::Write;
-            Write::write(&mut buf, &ch.to_le_bytes()).expect("write should work");
+            Write::write(&mut buf, &ch.to_le_bytes())?;
         }
 
         let mut hasher = Md5::new();
@@ -117,29 +129,26 @@ impl FritzApi {
             .finalize()
             .to_vec()
             .iter()
-            .map(|b| format!("{:02x}", b))
+            .map(|byte| format!("{:02x}", byte))
             .collect::<String>();
-
-        let payload = form_urlencoded::Serializer::new(String::new())
-            .append_pair("username", self.config.username.as_ref())
-            .append_pair("response", &format!("{}-{}", info.challenge, sum))
-            .finish();
 
         let auth_response = self
             .client
             .post(format!("{base}/login_sid.lua", base = self.config.base_url))
             .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(payload)
+            .body(form_data!(&[
+                ("username", &self.config.username),
+                ("response", &format!("{}-{}", info.challenge, sum)),
+            ]))
             .send()?
             .text()?;
 
         // TODO: reject with error if sids of challenge response and auth_response match.
-        let session: Session =
-            serde_xml_rs::from_str(&auth_response).expect("Should get the session info");
+        let session: Session = serde_xml_rs::from_str(&auth_response)?;
         Ok(session)
     }
 
-    fn authenticated(config: Config) -> reqwest::Result<Self> {
+    fn authenticated(config: Config) -> AnyError<Self> {
         let client = reqwest::blocking::Client::new();
         let mut api = Self {
             client,
@@ -151,101 +160,97 @@ impl FritzApi {
         Ok(api)
     }
 
-    fn query_overview(&self) -> reqwest::Result<serde_json::Value> {
-        let payload = form_urlencoded::Serializer::new(String::new())
-            .append_pair("sid", self.session.sid.as_str())
-            .append_pair("page", "overview")
-            .finish();
-
+    fn query_overview(&self) -> AnyError<serde_json::Value> {
+        println!("Fetching...");
         let res = self
             .client
             .post(format!("{base}/data.lua", base = self.config.base_url))
             .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(payload)
+            .body(form_data!(&[
+                ("sid", self.session.sid.as_str()),
+                ("page", "overview"),
+            ]))
             .send()?
             .text()?;
-
-        Ok(serde_json::from_str(&res).unwrap_or_default())
+        let data: serde_json::Value = serde_json::from_str(&res)?;
+        Ok(data)
     }
 
-    fn query_devices(&self) -> reqwest::Result<Devices> {
-        let payload = form_urlencoded::Serializer::new(String::new())
-            .append_pair("sid", self.session.sid.as_str())
-            .append_pair("page", "netDev")
-            .append_pair("xhrId", "all")
-            .finish();
-
+    fn query_devices(&self) -> AnyError<Devices> {
+        println!("Fetching...");
         let res = self
             .client
             .post(format!("{base}/data.lua", base = self.config.base_url))
             .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(payload)
+            .body(form_data!(&[
+                ("sid", self.session.sid.as_str()),
+                ("page", "netDev"),
+                ("xhrId", "all"),
+            ]))
             .send()?
             .text()?;
-        return Ok(serde_json::from_str(&res).unwrap_or_default());
+        let devices: Devices = serde_json::from_str(&res)?;
+        return Ok(devices);
     }
 
-    fn reboot(&self) -> reqwest::Result<serde_json::Value> {
-        let payload = form_urlencoded::Serializer::new(String::new())
-            .append_pair("sid", self.session.sid.as_str())
-            .append_pair("page", "reboot")
-            .append_pair("reboot", "0")
-            .finish();
-
+    fn reboot(&self) -> AnyError<bool> {
         let res = self
             .client
             .post(format!("{base}/data.lua", base = self.config.base_url))
             .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(payload)
+            .body(form_data![&[
+                ("sid", self.session.sid.as_str()),
+                ("page", "reboot"),
+                ("reboot", "0"),
+            ]])
             .send()?;
 
-        let result: serde_json::Value = serde_json::from_str(&res.text()?).unwrap();
+        let result: serde_json::Value = serde_json::from_str(&res.text()?)?;
+        let status = result
+            .pointer("data/reboot")
+            .and_then(serde_json::Value::as_str);
 
-        let payload = form_urlencoded::Serializer::new(String::new())
-            .append_pair("sid", self.session.sid.as_str())
-            .append_pair("ajax", "1")
-            .finish();
-
-        self.client
-            .post(format!("{base}/reboot.lua", base = self.config.base_url))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(payload)
-            .send()?;
-
-        Ok(result)
+        if let Some("ok") = status {
+            self.client
+                .post(format!("{base}/reboot.lua", base = self.config.base_url))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(form_data!(&[
+                    ("sid", self.session.sid.as_str()),
+                    ("ajax", "1"),
+                ]))
+                .send()?;
+            return Ok(true);
+        }
+        return Ok(false);
     }
 
     fn disconnect(&self) -> reqwest::Result<serde_json::Value> {
-        let query_data = [
-            ("sid", self.session.sid.as_str()),
-            ("myXhr", "1"),
-            ("action", "disconnect"),
-        ];
-
         self.client
             .get(format!(
                 "{base}/internet/inetstat_monitor.lua",
                 base = self.config.base_url
             ))
-            .query(&query_data)
+            .query(&[
+                ("sid", self.session.sid.as_str()),
+                ("myXhr", "1"),
+                ("action", "disconnect"),
+            ])
             .send()?;
 
         Ok(serde_json::Value::Null)
     }
 
     fn connect(&self) -> reqwest::Result<serde_json::Value> {
-        let query_data = [
-            ("sid", self.session.sid.as_str()),
-            ("myXhr", "1"),
-            ("action", "connect"),
-        ];
-
         self.client
             .get(format!(
                 "{base}/internet/inetstat_monitor.lua",
                 base = self.config.base_url
             ))
-            .query(&query_data)
+            .query(&[
+                ("sid", self.session.sid.as_str()),
+                ("myXhr", "1"),
+                ("action", "connect"),
+            ])
             .send()?;
 
         Ok(serde_json::Value::Null)
@@ -269,36 +274,44 @@ pub(crate) struct Cli {
 struct DevicesRow {
     name: String,
     ip: String,
+    lastused: String,
     #[serde(rename = "type")]
     typ: String,
     model: String,
     uid: String,
-    trusted: bool,
+    trusted: String,
     state: String,
 }
 
 impl<'a> table::TableRow<'a> for DevicesRow {}
 
 impl Cli {
-    fn info(&self, api: &FritzApi, _args: &Args) -> reqwest::Result<()> {
+    fn info(&self, api: &FritzApi, _args: &Args) -> AnyError<()> {
         let data = api.query_overview()?;
-        println!("{}", data);
+        println!("{data}");
         // TODO: tabular data lister for most of it using using table crate
         Ok(())
     }
-    fn reboot(&self, api: &FritzApi, _args: &Args) -> reqwest::Result<()> {
-        let result = api.reboot()?;
-        if result.is_object() {
-            println!("Reboot status: {}", result.get("data").unwrap());
-        }
+
+    fn reboot(&self, api: &FritzApi, _args: &Args) -> AnyError<()> {
+        let ok = api.reboot()?;
+        println!(
+            "Reboot status: {}",
+            match ok {
+                true => "Rebooting... This can take some time!! (5-10m)",
+                _ => "No Reboot!",
+            }
+        );
         Ok(())
     }
+
     fn reconnect(&self, api: &FritzApi, _args: &Args) -> reqwest::Result<()> {
         api.reconnect()?;
         println!("Heads up! This can take up to 30s to take full effect..");
         Ok(())
     }
-    fn devices(&self, api: &FritzApi, _args: &Args) -> reqwest::Result<()> {
+
+    fn devices(&self, api: &FritzApi, _args: &Args) -> AnyError<()> {
         let data = api.query_devices()?;
         let mut rows = vec![];
         if let Some(devices) = data.devices() {
@@ -309,6 +322,7 @@ impl Cli {
                 }
                 if let Some(ipv4) = device.ipv4 {
                     row.ip = ipv4.ip;
+                    row.lastused = ipv4.lastused.unwrap_or_default();
                 }
                 if let Some(typ) = device.typ {
                     row.typ = typ;
@@ -318,7 +332,9 @@ impl Cli {
                 }
                 row.uid = device.uid;
                 if let Some(trusted) = device.is_trusted {
-                    row.trusted = trusted;
+                    if trusted {
+                        row.trusted = "Yes".to_string();
+                    }
                 }
                 if let Some(state) = device.state {
                     row.state = state;
@@ -329,10 +345,14 @@ impl Cli {
         println!("{}", table::Renderer::default().to_string(&rows));
         Ok(())
     }
-    pub(crate) fn run(&self) -> reqwest::Result<()> {
+
+    pub(crate) fn run(&self) -> AnyError<()> {
         if let Some(command) = &self.command {
-            let file = fs::File::open("./config.json").unwrap();
-            let config: Config = serde_json::from_reader(file).unwrap();
+            let home = PathBuf::from(
+                env::var_os("HOME").expect("should be able to get `$HOME` from process."),
+            );
+            let config_path = home.join(".config/fritz/config.json");
+            let config = serde_json::from_reader(fs::File::open(config_path)?)?;
             let api = FritzApi::authenticated(config)?;
             match command {
                 Commands::Info(args) => self.info(&api, args)?,
@@ -346,6 +366,6 @@ impl Cli {
     }
 }
 
-// TODO: clean up unwraps/expects and fix up error handling
 // TODO: save sid with expire date to session.json and reuse?
-// TODO: xgd location for cache and config files.
+// TODO: xdg location for cache and config files.
+// TODO: clean up unwraps/expects and fix up error handling
