@@ -51,11 +51,11 @@ impl DockerApi {
     }
 }
 
-const COLUMN_SPACING: usize = 4;
 const ID_LENGTH: usize = 12;
 const IMAGE_ID_PREFIX: &str = "sha256:";
 
 #[derive(Default, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
 struct PsRow {
     id: String,
     names: String,
@@ -79,7 +79,7 @@ fn format_port(port: &Port) -> String {
     if let (Some(ip), Some(public)) = (&port.ip, &port.public_port) {
         let ip_format = match ip.as_str() {
             "::" => "[::]:".into(),
-             other => format!("{}", other),
+            other => format!("{}", other),
         };
         return format!("{ip_format}{public}->{private}{typ}");
     } else {
@@ -136,7 +136,7 @@ impl Cli {
             rows.push(row);
             rows.extend(collapsed);
         }
-        table::render_ansi(&rows, COLUMN_SPACING);
+        println!("{}", table::Renderer::default().to_string(&rows));
         Ok(())
     }
 

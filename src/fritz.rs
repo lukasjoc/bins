@@ -1,12 +1,10 @@
 /*** UNDER CONSTRUCTION ***/
 /*** WORK IN PROGGERS   ***/
-// TODO: clean up unwraps/expects and fix up error handling
-// TODO: save sid with expire date to session.json and reuse?
-// TODO: xgd location for cache and config files.
-
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use std::fs;
+
+use crate::table;
 
 #[derive(clap::Parser)]
 struct Args {}
@@ -25,7 +23,7 @@ enum Commands {
     Devices(Args),
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 struct Session {
     #[serde(rename = "SID")]
     sid: String,
@@ -35,11 +33,55 @@ struct Session {
     block_time: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct Config {
     base_url: String,
     username: String,
     password: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+struct IpV4 {
+    ip: String,
+    lastused: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+struct Device {
+    #[serde(rename = "UID")]
+    uid: String,
+    classes: Option<String>,
+    #[serde(rename = "ipv4")]
+    ipv4: Option<IpV4>,
+    #[serde(rename = "isTrusted")]
+    is_trusted: Option<bool>,
+    mac: Option<String>,
+    model: Option<String>,
+    name: Option<String>,
+    state: Option<String>,
+    #[serde(rename = "type")]
+    typ: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+struct DeviceData {
+    passive: Option<Vec<Device>>,
+    active: Option<Vec<Device>>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Devices {
+    pid: String,
+    data: Option<DeviceData>,
+}
+
+impl Devices {
+    fn devices(self) -> Option<impl Iterator<Item = Device>> {
+        let d = self.data?;
+        let active = d.active.into_iter().flatten();
+        let passive = d.passive.into_iter().flatten();
+        return active.chain(passive).into();
+    }
 }
 
 #[derive(Debug)]
@@ -109,7 +151,7 @@ impl FritzApi {
         Ok(api)
     }
 
-    fn overview(&self) -> reqwest::Result<serde_json::Value> {
+    fn query_overview(&self) -> reqwest::Result<serde_json::Value> {
         let payload = form_urlencoded::Serializer::new(String::new())
             .append_pair("sid", self.session.sid.as_str())
             .append_pair("page", "overview")
@@ -124,6 +166,23 @@ impl FritzApi {
             .text()?;
 
         Ok(serde_json::from_str(&res).unwrap_or_default())
+    }
+
+    fn query_devices(&self) -> reqwest::Result<Devices> {
+        let payload = form_urlencoded::Serializer::new(String::new())
+            .append_pair("sid", self.session.sid.as_str())
+            .append_pair("page", "netDev")
+            .append_pair("xhrId", "all")
+            .finish();
+
+        let res = self
+            .client
+            .post(format!("{base}/data.lua", base = self.config.base_url))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(payload)
+            .send()?
+            .text()?;
+        return Ok(serde_json::from_str(&res).unwrap_or_default());
     }
 
     fn reboot(&self) -> reqwest::Result<serde_json::Value> {
@@ -197,24 +256,6 @@ impl FritzApi {
         self.connect()?;
         Ok(serde_json::Value::Null)
     }
-
-    fn devices(&self) -> reqwest::Result<serde_json::Value> {
-        let payload = form_urlencoded::Serializer::new(String::new())
-            .append_pair("sid", self.session.sid.as_str())
-            .append_pair("page", "netDev")
-            .append_pair("xhrId", "all")
-            .finish();
-
-        let res = self
-            .client
-            .post(format!("{base}/data.lua", base = self.config.base_url))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(payload)
-            .send()?
-            .text()?;
-
-        Ok(serde_json::from_str(&res).unwrap_or_default())
-    }
 }
 
 #[derive(clap::Parser)]
@@ -223,10 +264,25 @@ pub(crate) struct Cli {
     command: Option<Commands>,
 }
 
+#[derive(Default, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+struct DevicesRow {
+    name: String,
+    ip: String,
+    #[serde(rename = "type")]
+    typ: String,
+    model: String,
+    uid: String,
+    trusted: bool,
+    state: String,
+}
+
+impl<'a> table::TableRow<'a> for DevicesRow {}
+
 impl Cli {
     fn info(&self, api: &FritzApi, _args: &Args) -> reqwest::Result<()> {
-        let data = api.overview()?;
-        println!("{:#}", data);
+        let data = api.query_overview()?;
+        println!("{}", data);
         // TODO: tabular data lister for most of it using using table crate
         Ok(())
     }
@@ -243,9 +299,34 @@ impl Cli {
         Ok(())
     }
     fn devices(&self, api: &FritzApi, _args: &Args) -> reqwest::Result<()> {
-        let data = api.devices()?;
-        // TODO: tabular data lister using table crate
-        println!("{:#}", data);
+        let data = api.query_devices()?;
+        let mut rows = vec![];
+        if let Some(devices) = data.devices() {
+            for device in devices {
+                let mut row = DevicesRow::default();
+                if let Some(name) = device.name {
+                    row.name = name;
+                }
+                if let Some(ipv4) = device.ipv4 {
+                    row.ip = ipv4.ip;
+                }
+                if let Some(typ) = device.typ {
+                    row.typ = typ;
+                }
+                if let Some(model) = device.model {
+                    row.model = model;
+                }
+                row.uid = device.uid;
+                if let Some(trusted) = device.is_trusted {
+                    row.trusted = trusted;
+                }
+                if let Some(state) = device.state {
+                    row.state = state;
+                }
+                rows.push(row);
+            }
+        }
+        println!("{}", table::Renderer::default().to_string(&rows));
         Ok(())
     }
     pub(crate) fn run(&self) -> reqwest::Result<()> {
@@ -264,3 +345,7 @@ impl Cli {
         Ok(())
     }
 }
+
+// TODO: clean up unwraps/expects and fix up error handling
+// TODO: save sid with expire date to session.json and reuse?
+// TODO: xgd location for cache and config files.
