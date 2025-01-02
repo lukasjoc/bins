@@ -121,7 +121,6 @@ dependencies = [
  "bollard",
  "clap",
  "form_urlencoded",
- "futures-util",
  "md-5",
  "reqwest",
  "serde",

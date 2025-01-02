@@ -1,4 +1,5 @@
-use md5::{Digest, Md5};
+use core::fmt;
+use md5::{digest::FixedOutputReset, Digest, Md5};
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::PathBuf};
 
@@ -9,8 +10,6 @@ struct Args {}
 
 #[derive(clap::Subcommand)]
 enum Commands {
-    /// Initialize the config for the tool automatically.
-    Init(Args),
     /// Display debugging information about the FritzBox.
     Info(Args),
     /// Reboot the device instantly.
@@ -21,7 +20,7 @@ enum Commands {
     Devices(Args),
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Session {
     #[serde(rename = "SID")]
     sid: String,
@@ -31,7 +30,23 @@ struct Session {
     block_time: i64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            sid: "0000000000000000".into(),
+            challenge: String::default(),
+            block_time: i64::default(),
+        }
+    }
+}
+
+impl Session {
+    fn is_default_sid(&self) -> bool {
+        return self.sid == Self::default().sid;
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Default)]
 struct Config {
     base_url: String,
     username: String,
@@ -116,7 +131,7 @@ impl Devices {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct FritzApi {
     config: Config,
     session: Session,
@@ -136,17 +151,34 @@ macro_rules! form_data {
     }};
 }
 
+#[derive(Debug)]
+struct LoginError;
+impl LoginError {
+    fn boxed() -> Box<Self> {
+        Box::new(Self)
+    }
+}
+
+impl fmt::Display for LoginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", "Login was not successful!")
+    }
+}
+
+impl std::error::Error for LoginError {}
+
 impl FritzApi {
     fn login(&self) -> AnyError<Session> {
-        let challenge_response = self
+        let challenge_data_raw = self
             .client
             .get(format!("{base}/login_sid.lua", base = self.config.base_url))
             .send()?
             .text()?;
-        let info: Session = serde_xml_rs::from_str(&challenge_response)?;
+        let challenge_data: Session = serde_xml_rs::from_str(&challenge_data_raw)?;
+        let challenge = challenge_data.challenge;
 
         let mut buf: Vec<u8> = vec![];
-        for char in (format!("{}-{}", info.challenge, self.config.password)).encode_utf16() {
+        for char in (format!("{}-{}", challenge, self.config.password)).encode_utf16() {
             let ch = match char {
                 ch if ch > 255 => 0x2e,
                 other => other,
@@ -154,11 +186,10 @@ impl FritzApi {
             use std::io::Write;
             Write::write(&mut buf, &ch.to_le_bytes())?;
         }
-
         let mut hasher = Md5::new();
         hasher.update(&buf);
         let sum = hasher
-            .finalize()
+            .finalize_fixed_reset()
             .to_vec()
             .iter()
             .map(|byte| format!("{:02x}", byte))
@@ -170,13 +201,16 @@ impl FritzApi {
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(form_data!(&[
                 ("username", &self.config.username),
-                ("response", &format!("{}-{}", info.challenge, sum)),
+                ("response", &format!("{challenge}-{sum}")),
             ]))
             .send()?
             .text()?;
 
-        // TODO: reject with error if sids of challenge response and auth_response match.
         let session: Session = serde_xml_rs::from_str(&auth_response)?;
+        if session.is_default_sid() {
+            return Err(LoginError::boxed());
+        }
+
         Ok(session)
     }
 
@@ -185,7 +219,7 @@ impl FritzApi {
         let mut api = Self {
             client,
             config,
-            session: Session::default(),
+            ..Default::default()
         };
         let session = api.login()?;
         api.session = session;
@@ -307,8 +341,7 @@ struct DevicesRow {
     name: String,
     ip: String,
     lastused: String,
-    #[serde(rename = "type")]
-    typ: String,
+    connection: String,
     model: String,
     uid: String,
     trusted: String,
@@ -393,7 +426,7 @@ impl Cli {
                     row.lastused = ipv4.lastused.unwrap_or_default();
                 }
                 if let Some(typ) = device.typ {
-                    row.typ = typ;
+                    row.connection = typ;
                 }
                 if let Some(model) = device.model {
                     row.model = model;
@@ -427,7 +460,6 @@ impl Cli {
                 Commands::Reboot(args) => self.reboot(&api, args)?,
                 Commands::Reconnect(args) => self.reconnect(&api, args)?,
                 Commands::Devices(args) => self.devices(&api, args)?,
-                _ => unimplemented!("Command not implemented yet!"),
             }
         }
         Ok(())
