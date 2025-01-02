@@ -1,10 +1,14 @@
 use clap::Parser;
 mod docker;
+mod fritz;
 mod table;
 
 #[derive(clap::Subcommand)]
 enum Commands {
+    #[command(arg_required_else_help(true))]
     Docker(docker::Cli),
+    #[command(arg_required_else_help(true))]
+    Fritz(fritz::Cli),
 }
 
 #[derive(clap::Parser)]
@@ -19,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(command) = args.command {
         match command {
             Commands::Docker(cli) => cli.run().map_err(|err| format!("{err}"))?,
+            Commands::Fritz(cli) => cli.run().map_err(|err| format!("{err}"))?,
         }
     }
     Ok(())
