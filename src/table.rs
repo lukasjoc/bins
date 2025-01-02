@@ -53,7 +53,7 @@ impl Renderer {
         }
 
         let cols = rows.first().unwrap().columns().unwrap_or_default();
-        let mut column_widths: Vec<usize> = cols.iter().map(|name| name.len()).collect();
+        let mut column_widths: Vec<usize> = cols.iter().map(|name| name.chars().count()).collect();
         let cells: Vec<String> = rows
             .iter()
             .flat_map(|row| row.cells().unwrap_or_default()) /*FIXME: NOT SURE I LIKE THIS :, */
@@ -63,7 +63,7 @@ impl Renderer {
             for i in (column_index..cells.len()).step_by(cols.len()) {
                 if let Some(content) = cells.get(i) {
                     if content.len() > column_widths[column_index] {
-                        column_widths[column_index] = content.len();
+                        column_widths[column_index] = content.chars().count();
                     }
                 };
             }

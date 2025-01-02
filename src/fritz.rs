@@ -1,5 +1,3 @@
-/*** UNDER CONSTRUCTION ***/
-/*** WORK IN PROGGERS   ***/
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::PathBuf};
@@ -40,13 +38,47 @@ struct Config {
     password: String,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ConnectionInfo {
+    #[serde(rename = "led")]
+    state: String,
+    up: String,
+    down: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct OsInfo {
+    #[serde(rename = "Productname")]
+    product_name: String,
+    #[serde(rename = "isUpdateAvail")]
+    is_update_available: bool,
+    #[serde(rename = "nspver")]
+    version: String,
+    #[serde(rename = "fb_name")]
+    name: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct OverviewData {
+    #[serde(rename = "fritzos")]
+    os: OsInfo,
+    internet: ConnectionInfo,
+    dsl: ConnectionInfo,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Overview {
+    pid: String,
+    data: OverviewData,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct IpV4 {
     ip: String,
     lastused: Option<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct Device {
     #[serde(rename = "UID")]
     uid: String,
@@ -63,7 +95,7 @@ struct Device {
     typ: Option<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct DeviceData {
     passive: Option<Vec<Device>>,
     active: Option<Vec<Device>>,
@@ -160,7 +192,7 @@ impl FritzApi {
         Ok(api)
     }
 
-    fn query_overview(&self) -> AnyError<serde_json::Value> {
+    fn query_overview(&self) -> AnyError<Overview> {
         println!("Fetching...");
         let res = self
             .client
@@ -172,8 +204,8 @@ impl FritzApi {
             ]))
             .send()?
             .text()?;
-        let data: serde_json::Value = serde_json::from_str(&res)?;
-        Ok(data)
+        let overview: Overview = serde_json::from_str(&res)?;
+        Ok(overview)
     }
 
     fn query_devices(&self) -> AnyError<Devices> {
@@ -285,11 +317,47 @@ struct DevicesRow {
 
 impl<'a> table::TableRow<'a> for DevicesRow {}
 
+#[derive(Default, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+struct OverviewRow {
+    model: String,
+    version: String,
+    name: String,
+    update_available: String,
+    dsl_status: String,
+    inet_status: String,
+}
+
+impl<'a> table::TableRow<'a> for OverviewRow {}
+
 impl Cli {
     fn info(&self, api: &FritzApi, _args: &Args) -> AnyError<()> {
-        let data = api.query_overview()?;
-        println!("{data}");
-        // TODO: tabular data lister for most of it using using table crate
+        let overview = api.query_overview()?;
+
+        let os = overview.data.os;
+        let mut row = OverviewRow::default();
+        row.model = os.product_name;
+        row.version = os.version;
+        row.name = os.name;
+        row.update_available = (if os.is_update_available { "Yes" } else { "No" }).to_string();
+
+        let dsl = overview.data.dsl;
+        row.dsl_status = format!(
+            "{up} / {down} ({state})",
+            state = dsl.state,
+            up = dsl.up,
+            down = dsl.down
+        );
+
+        let inet = overview.data.internet;
+        row.inet_status = format!(
+            "{up} / {down} ({state})",
+            state = inet.state,
+            up = inet.up,
+            down = inet.down
+        );
+
+        println!("{}", table::Renderer::default().to_string(&[row]));
         Ok(())
     }
 
@@ -368,4 +436,3 @@ impl Cli {
 
 // TODO: save sid with expire date to session.json and reuse?
 // TODO: xdg location for cache and config files.
-// TODO: clean up unwraps/expects and fix up error handling
