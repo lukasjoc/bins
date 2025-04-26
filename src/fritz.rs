@@ -3,12 +3,7 @@ use core::fmt;
 use md5::{digest::FixedOutputReset, Digest, Md5};
 use reqwest as rw;
 use serde::{Deserialize, Serialize};
-use std::{
-    env,
-    fs::{self, File},
-    io::Write,
-    path::PathBuf,
-};
+use std::{env, fs::File, io::Write};
 
 #[derive(clap::Parser)]
 struct Args {}
@@ -52,10 +47,10 @@ impl Session {
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
-struct Config {
-    base_url: String,
-    username: String,
-    password: String,
+struct Config<'a> {
+    base_url: &'a str,
+    username: &'a str,
+    password: &'a str,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -136,6 +131,7 @@ impl Devices {
     }
 }
 
+// TODO: I dont i need this trait anymore.
 trait FritzApiFunctions {
     /// Optain a new session with a given user config.
     fn login(&mut self) -> AnyError<&Session>;
@@ -152,8 +148,8 @@ trait FritzApiFunctions {
 }
 
 #[derive(Debug)]
-struct FritzApi {
-    config: Config,
+struct FritzClient<'a> {
+    config: Config<'a>,
     session: Session,
     client: rw::blocking::Client,
 }
@@ -187,8 +183,8 @@ impl fmt::Display for LoginError {
 
 impl std::error::Error for LoginError {}
 
-impl FritzApi {
-    fn new_with_config(config: Config) -> Self {
+impl<'a> FritzClient<'a> {
+    fn new_with_config(config: Config<'a>) -> Self {
         Self {
             client: rw::blocking::Client::new(),
             config,
@@ -197,13 +193,10 @@ impl FritzApi {
     }
 }
 
-impl FritzApiFunctions for FritzApi {
+impl<'a> FritzApiFunctions for FritzClient<'a> {
     fn login(&mut self) -> AnyError<&Session> {
-        let challenge_data_raw = self
-            .client
-            .get(format!("{base}/login_sid.lua", base = self.config.base_url))
-            .send()?
-            .text()?;
+        let path = format!("{base}/login_sid.lua", base = self.config.base_url);
+        let challenge_data_raw = self.client.get(path).send()?.text()?;
         let challenge_data: Session = serde_xml_rs::from_str(&challenge_data_raw)?;
         let challenge = challenge_data.challenge;
 
@@ -225,13 +218,14 @@ impl FritzApiFunctions for FritzApi {
             .map(|byte| format!("{:02x}", byte))
             .collect::<String>();
 
+        let response_text = format!("{challenge}-{sum}");
         let auth_response = self
             .client
             .post(format!("{base}/login_sid.lua", base = self.config.base_url))
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(form_data!(&[
-                ("username", &self.config.username),
-                ("response", &format!("{challenge}-{sum}")),
+                ("username", self.config.username),
+                ("response", response_text.as_str()),
             ]))
             .send()?
             .text()?;
@@ -240,6 +234,7 @@ impl FritzApiFunctions for FritzApi {
         if session.is_default_sid() {
             return Err(LoginError::boxed());
         }
+
         self.session = session;
         Ok(&self.session)
     }
@@ -278,9 +273,10 @@ impl FritzApiFunctions for FritzApi {
     }
 
     fn reboot(&self) -> AnyError<bool> {
+        let url = format!("{base}/data.lua", base = self.config.base_url);
         let res = self
             .client
-            .post(format!("{base}/data.lua", base = self.config.base_url))
+            .post(url)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(form_data![&[
                 ("sid", self.session.sid.as_str()),
@@ -300,15 +296,16 @@ impl FritzApiFunctions for FritzApi {
         let status = (&result.pointer("/data/reboot")).and_then(serde_json::Value::as_str);
 
         if let Some("ok") = status {
-            self.client
-                .post(format!("{base}/reboot.lua", base = self.config.base_url))
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .body(form_data!(&[
-                    ("sid", self.session.sid.as_str()),
-                    ("ajax", "1"),
-                ]))
-                .send()?;
-            return Ok(true);
+            // self.client
+            //     .post(format!("{base}/reboot.lua", base = self.config.base_url))
+            //     .header("Content-Type", "application/x-www-form-urlencoded")
+            //     .body(form_data!(&[
+            //         ("sid", self.session.sid.as_str()),
+            //         ("ajax", "1"),
+            //     ]))
+            //     .send()?;
+            todo!("NOT DOING REBOOT. MOCK THIS SHIT");
+            // return Ok(true);
         }
         return Ok(false);
     }
@@ -381,7 +378,7 @@ struct OverviewRow {
 impl<'a> table::TableRow<'a> for OverviewRow {}
 
 impl Cli {
-    fn info(&self, api: &FritzApi, _args: &Args) -> AnyError<()> {
+    fn info(&self, api: &FritzClient, _args: &Args) -> AnyError<()> {
         let overview = api.overview()?;
 
         let os = overview.data.os;
@@ -411,7 +408,7 @@ impl Cli {
         Ok(())
     }
 
-    fn reboot(&self, api: &FritzApi, _args: &Args) -> AnyError<()> {
+    fn reboot(&self, api: &FritzClient, _args: &Args) -> AnyError<()> {
         let ok = api.reboot()?;
         println!(
             "Reboot status: {}",
@@ -423,14 +420,14 @@ impl Cli {
         Ok(())
     }
 
-    fn reconnect(&self, api: &FritzApi, _args: &Args) -> rw::Result<()> {
+    fn reconnect(&self, api: &FritzClient, _args: &Args) -> rw::Result<()> {
         api.disconnect()?;
         api.connect()?;
         println!("Heads up! This can take up to 30s to take full effect..");
         Ok(())
     }
 
-    fn devices(&self, api: &FritzApi, _args: &Args) -> AnyError<()> {
+    fn devices(&self, api: &FritzClient, _args: &Args) -> AnyError<()> {
         let data = api.devices()?;
         let mut rows = vec![];
         if let Some(devices) = data.devices() {
@@ -467,14 +464,25 @@ impl Cli {
 
     pub(crate) fn run(&self) -> AnyError<()> {
         if let Some(command) = &self.command {
-            let home = PathBuf::from(
-                env::var_os("HOME").expect("should be able to get `$HOME` from process."),
-            );
             // TODO: save sid with expire date to session.json and reuse?
-            // TODO: xdg location for cache and config files.
-            let config_path = home.join(".config/fritz/config.json");
-            let config = serde_json::from_reader(fs::File::open(config_path)?)?;
-            let mut api = FritzApi::new_with_config(config);
+            let base_url = env::var_os("FRITZ_URL")
+                .expect("expected FRITZ_URL env var")
+                .into_string()
+                .expect("expected FRITZ_URL env var to be valid");
+            let username = env::var_os("FRITZ_USER")
+                .expect("expected FRITZ_USER env var")
+                .into_string()
+                .expect("expected FRITZ_USER env var to be valid");
+            let password = env::var_os("FRITZ_PASSWORD")
+                .expect("expected FRITZ_PASSWORD env var")
+                .into_string()
+                .expect("expected FRITZ_PASSWORD env var to be valid");
+            let config = Config {
+                base_url: base_url.as_str(),
+                username: username.as_str(),
+                password: password.as_str(),
+            };
+            let mut api = FritzClient::new_with_config(config);
             api.login()?;
             match command {
                 Commands::Info(args) => self.info(&api, args)?,
