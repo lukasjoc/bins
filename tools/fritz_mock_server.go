@@ -45,9 +45,9 @@ func mockHandleLoginSidLua(w http.ResponseWriter, r *http.Request) {
 
 func mockHandleDataLua(w http.ResponseWriter, r *http.Request) {
 	type PageResponse struct {
-		Pid  string         `json:"pid"`
+		PID  string         `json:"pid"`
 		Data map[string]any `json:"data"`
-		Sid  string         `json:"sid"`
+		SID  string         `json:"sid"`
 	}
 	page := r.FormValue("page")
 	switch page {
