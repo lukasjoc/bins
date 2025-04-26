@@ -1,9 +1,14 @@
+use crate::table;
 use core::fmt;
 use md5::{digest::FixedOutputReset, Digest, Md5};
+use reqwest as rw;
 use serde::{Deserialize, Serialize};
-use std::{env, fs, path::PathBuf};
-
-use crate::table;
+use std::{
+    env,
+    fs::{self, File},
+    io::Write,
+    path::PathBuf,
+};
 
 #[derive(clap::Parser)]
 struct Args {}
@@ -131,11 +136,26 @@ impl Devices {
     }
 }
 
-#[derive(Debug, Default)]
+trait FritzApiFunctions {
+    /// Optain a new session with a given user config.
+    fn login(&mut self) -> AnyError<&Session>;
+    /// Query the overview data.
+    fn overview(&self) -> AnyError<Overview>;
+    /// Query the devices data.
+    fn devices(&self) -> AnyError<Devices>;
+    // Reboot the device.
+    fn reboot(&self) -> AnyError<bool>;
+    // Connect the device.
+    fn connect(&self) -> rw::Result<serde_json::Value>;
+    // Disconnect the device.
+    fn disconnect(&self) -> rw::Result<serde_json::Value>;
+}
+
+#[derive(Debug)]
 struct FritzApi {
     config: Config,
     session: Session,
-    client: reqwest::blocking::Client,
+    client: rw::blocking::Client,
 }
 
 type AnyError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -168,7 +188,17 @@ impl fmt::Display for LoginError {
 impl std::error::Error for LoginError {}
 
 impl FritzApi {
-    fn login(&self) -> AnyError<Session> {
+    fn new_with_config(config: Config) -> Self {
+        Self {
+            client: rw::blocking::Client::new(),
+            config,
+            session: Session::default(),
+        }
+    }
+}
+
+impl FritzApiFunctions for FritzApi {
+    fn login(&mut self) -> AnyError<&Session> {
         let challenge_data_raw = self
             .client
             .get(format!("{base}/login_sid.lua", base = self.config.base_url))
@@ -210,23 +240,11 @@ impl FritzApi {
         if session.is_default_sid() {
             return Err(LoginError::boxed());
         }
-
-        Ok(session)
+        self.session = session;
+        Ok(&self.session)
     }
 
-    fn authenticated(config: Config) -> AnyError<Self> {
-        let client = reqwest::blocking::Client::new();
-        let mut api = Self {
-            client,
-            config,
-            ..Default::default()
-        };
-        let session = api.login()?;
-        api.session = session;
-        Ok(api)
-    }
-
-    fn query_overview(&self) -> AnyError<Overview> {
+    fn overview(&self) -> AnyError<Overview> {
         println!("Fetching...");
         let res = self
             .client
@@ -242,7 +260,7 @@ impl FritzApi {
         Ok(overview)
     }
 
-    fn query_devices(&self) -> AnyError<Devices> {
+    fn devices(&self) -> AnyError<Devices> {
         println!("Fetching...");
         let res = self
             .client
@@ -271,10 +289,15 @@ impl FritzApi {
             ]])
             .send()?;
 
-        let result: serde_json::Value = serde_json::from_str(&res.text()?)?;
-        let status = result
-            .pointer("data/reboot")
-            .and_then(serde_json::Value::as_str);
+        let t = res.bytes()?;
+        let mut fd = File::options()
+            .write(true)
+            .create(true)
+            .open("reboot.json")?;
+        let _ = fd.write(t.as_ref());
+
+        let result: serde_json::Value = serde_json::from_slice(t.as_ref())?;
+        let status = (&result.pointer("/data/reboot")).and_then(serde_json::Value::as_str);
 
         if let Some("ok") = status {
             self.client
@@ -290,7 +313,7 @@ impl FritzApi {
         return Ok(false);
     }
 
-    fn disconnect(&self) -> reqwest::Result<serde_json::Value> {
+    fn disconnect(&self) -> rw::Result<serde_json::Value> {
         self.client
             .get(format!(
                 "{base}/internet/inetstat_monitor.lua",
@@ -306,7 +329,7 @@ impl FritzApi {
         Ok(serde_json::Value::Null)
     }
 
-    fn connect(&self) -> reqwest::Result<serde_json::Value> {
+    fn connect(&self) -> rw::Result<serde_json::Value> {
         self.client
             .get(format!(
                 "{base}/internet/inetstat_monitor.lua",
@@ -319,12 +342,6 @@ impl FritzApi {
             ])
             .send()?;
 
-        Ok(serde_json::Value::Null)
-    }
-
-    fn reconnect(&self) -> reqwest::Result<serde_json::Value> {
-        self.disconnect()?;
-        self.connect()?;
         Ok(serde_json::Value::Null)
     }
 }
@@ -365,7 +382,7 @@ impl<'a> table::TableRow<'a> for OverviewRow {}
 
 impl Cli {
     fn info(&self, api: &FritzApi, _args: &Args) -> AnyError<()> {
-        let overview = api.query_overview()?;
+        let overview = api.overview()?;
 
         let os = overview.data.os;
         let mut row = OverviewRow::default();
@@ -406,14 +423,15 @@ impl Cli {
         Ok(())
     }
 
-    fn reconnect(&self, api: &FritzApi, _args: &Args) -> reqwest::Result<()> {
-        api.reconnect()?;
+    fn reconnect(&self, api: &FritzApi, _args: &Args) -> rw::Result<()> {
+        api.disconnect()?;
+        api.connect()?;
         println!("Heads up! This can take up to 30s to take full effect..");
         Ok(())
     }
 
     fn devices(&self, api: &FritzApi, _args: &Args) -> AnyError<()> {
-        let data = api.query_devices()?;
+        let data = api.devices()?;
         let mut rows = vec![];
         if let Some(devices) = data.devices() {
             for device in devices {
@@ -452,9 +470,12 @@ impl Cli {
             let home = PathBuf::from(
                 env::var_os("HOME").expect("should be able to get `$HOME` from process."),
             );
+            // TODO: save sid with expire date to session.json and reuse?
+            // TODO: xdg location for cache and config files.
             let config_path = home.join(".config/fritz/config.json");
             let config = serde_json::from_reader(fs::File::open(config_path)?)?;
-            let api = FritzApi::authenticated(config)?;
+            let mut api = FritzApi::new_with_config(config);
+            api.login()?;
             match command {
                 Commands::Info(args) => self.info(&api, args)?,
                 Commands::Reboot(args) => self.reboot(&api, args)?,
@@ -465,6 +486,3 @@ impl Cli {
         Ok(())
     }
 }
-
-// TODO: save sid with expire date to session.json and reuse?
-// TODO: xdg location for cache and config files.

@@ -1,4 +1,4 @@
 /target
 compose.yml
 .env
-config.json
+*.json
