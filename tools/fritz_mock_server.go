@@ -30,7 +30,6 @@ func jsonResponse(w http.ResponseWriter, data any) {
 }
 
 func mockHandleLoginSidLua(w http.ResponseWriter, r *http.Request) {
-	// Not reall testing just passing through..
 	type SessionInfo struct {
 		SID       string
 		Challenge string
@@ -44,9 +43,32 @@ func mockHandleLoginSidLua(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func mockHandleDataLua(w http.ResponseWriter, r *http.Request) {
+	type PageResponse struct {
+		Pid  string         `json:"pid"`
+		Data map[string]any `json:"data"`
+		Sid  string         `json:"sid"`
+	}
+	page := r.FormValue("page")
+	switch page {
+	case "reboot":
+		jsonResponse(w, PageResponse{
+			page,
+			map[string]any{
+				"reboot": "ok",
+				"redirect": map[string]any{
+					"page": "rootReboot",
+				},
+			},
+			loginSidSuccess,
+		})
+	}
+}
+
 func main() {
 	slog := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{AddSource: true}))
 	http.HandleFunc("/login_sid.lua", mockHandleLoginSidLua)
+	http.HandleFunc("/data.lua", mockHandleDataLua)
 	addr := ":8000"
 	slog.Info("Starting at : ", "Address", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))

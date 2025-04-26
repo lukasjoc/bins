@@ -3,7 +3,7 @@ use core::fmt;
 use md5::{digest::FixedOutputReset, Digest, Md5};
 use reqwest as rw;
 use serde::{Deserialize, Serialize};
-use std::{env, fs::File, io::Write};
+use std::env;
 
 #[derive(clap::Parser)]
 struct Args {}
@@ -286,26 +286,20 @@ impl<'a> FritzApiFunctions for FritzClient<'a> {
             .send()?;
 
         let t = res.bytes()?;
-        let mut fd = File::options()
-            .write(true)
-            .create(true)
-            .open("reboot.json")?;
-        let _ = fd.write(t.as_ref());
 
         let result: serde_json::Value = serde_json::from_slice(t.as_ref())?;
         let status = (&result.pointer("/data/reboot")).and_then(serde_json::Value::as_str);
 
         if let Some("ok") = status {
-            // self.client
-            //     .post(format!("{base}/reboot.lua", base = self.config.base_url))
-            //     .header("Content-Type", "application/x-www-form-urlencoded")
-            //     .body(form_data!(&[
-            //         ("sid", self.session.sid.as_str()),
-            //         ("ajax", "1"),
-            //     ]))
-            //     .send()?;
-            todo!("NOT DOING REBOOT. MOCK THIS SHIT");
-            // return Ok(true);
+            self.client
+                .post(format!("{base}/reboot.lua", base = self.config.base_url))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(form_data!(&[
+                    ("sid", self.session.sid.as_str()),
+                    ("ajax", "1"),
+                ]))
+                .send()?;
+            return Ok(true);
         }
         return Ok(false);
     }
